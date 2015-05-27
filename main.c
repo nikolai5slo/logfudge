@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include "user.h"
 #include <sys/socket.h>
+#include <sys/syslog.h>
 
 #if WORDSIZE == 64
 	#define SYSCALL_OPEN 2
@@ -85,14 +86,14 @@ char* get_str_from_addr(pid_t pid,long addr){
 
 void write_form_addr(int fd,pid_t pid,long addr,size_t len){
 	long buffer;
-	for(int i=0;i<len;i+=sizeof(long)){
+	for(int i=sizeof(long);i<len;i+=sizeof(long)){
 		buffer=ptrace(PTRACE_PEEKDATA, pid, addr);
 		write(fd, &buffer, sizeof(long));
 		addr+=sizeof(long);
 	}
 
 	buffer=ptrace(PTRACE_PEEKDATA, pid, addr);
-	write(fd, &buffer, sizeof(long)%sizeof(long));
+	write(fd, &buffer, len%sizeof(long));
 } 
 
 long uregs_regs(struct user_regs_struct uregs, int regnum){
@@ -113,7 +114,8 @@ long uregs_regs(struct user_regs_struct uregs, int regnum){
 }
 
 int monitor_child(pid_t pid, char* outfilename) {
-    int status, syscall, retval;
+    long retval,syscall;
+    int status;
     // Wait for child
     waitpid(pid, &status, 0);
 
@@ -124,7 +126,7 @@ int monitor_child(pid_t pid, char* outfilename) {
     int out=open(outfilename,O_WRONLY|O_CREAT, S_IRUSR | S_IRGRP | S_IROTH);
 
     if(!out){
-    	fprintf(stderr, "Error opening output file \"%s\" for write.\n",outfilename);
+    	////fprintf(stderr, "Error opening output file \"%s\" for write.\n",outfilename);
     	fflush(stderr);
     	exit(1);
     }
@@ -140,10 +142,13 @@ int monitor_child(pid_t pid, char* outfilename) {
         char* str;
         long tmp;
         short sa_family;
+        int save_retval=0;
 
-        //fprintf(stderr,"%d\n",uregs.orig_rax);
+        syscall=uregs_regs(uregs,0);
+
+        ////fprintf(stderr,"%d\n",uregs.orig_rax);
         //printf("HERE %d",uregs_regs(uregs,0)); fflush(stdout);
-        switch(uregs_regs(uregs,0)){
+        switch(syscall){
         	case SYSCALL_OPEN: // If it is systemcall for open save descriptor
         		tmp=uregs_regs(uregs,2);
 	        	if(tmp & O_WRONLY || tmp & O_RDWR){
@@ -152,16 +157,15 @@ int monitor_child(pid_t pid, char* outfilename) {
 	        		tmp=SYSCALL_OPEN;
 	        		write(out,&tmp,sizeof(tmp));
 	        		
-	        		tmp=uregs_regs(uregs,1);
-	        		write(out,&tmp,sizeof(tmp));
-	        		
 	        		// Write string length
 	        		tmp=strlen(str);
 	        		write(out,&tmp,sizeof(tmp));
 
 	        		// Write actual string
 	        		write(out,str,sizeof(char)*strlen(str));
-	            	fprintf(stderr,"%s\n",str);    
+	            	////fprintf(stderr,"OPEN %s\n",str);    
+
+	            	save_retval=1;
 	            }
         		break;
         	case SYSCALL_WRITE:
@@ -180,22 +184,25 @@ int monitor_child(pid_t pid, char* outfilename) {
         		// Write actual data
         		write_form_addr(out, pid, uregs_regs(uregs,2), uregs_regs(uregs,3));
 
-            	fprintf(stderr,"WRITE %s %X\n",str,uregs_regs(uregs,3));   
+            	//fprintf(stderr,"WRITE(%d) %s %X\n",uregs_regs(uregs,1),str,uregs_regs(uregs,3));   
         		break;
         	case SYSCALL_CONNECT: 
 
         		sa_family=ptrace(PTRACE_PEEKDATA, pid, uregs_regs(uregs,2));
         		if(sa_family==AF_UNIX){
+        			tmp=SYSCALL_CONNECT;
+        			write(out, &tmp, sizeof(tmp));
+
         			write_form_addr(out, pid, uregs_regs(uregs,2)+sizeof(short), 108);
         			
         			str=get_str_from_addr(pid, uregs_regs(uregs,2)+sizeof(short));
-        			fprintf(stderr,"CONNECT %d %s\n",uregs_regs(uregs,1),str);  
+        			//fprintf(stderr,"CONNECT %d %s\n",uregs_regs(uregs,1),str);  
         		}
 
         		break;
         	case SYSCALL_SENDTO:
         		str=get_str_from_addr(pid, uregs_regs(uregs,2));
-				tmp=SYSCALL_WRITE;
+				tmp=SYSCALL_SENDTO;
         		write(out,&tmp,sizeof(tmp));
         		
 
@@ -209,7 +216,7 @@ int monitor_child(pid_t pid, char* outfilename) {
         		// Write actual data
         		write_form_addr(out, pid, uregs_regs(uregs,2), uregs_regs(uregs,3));
 
-        		fprintf(stderr,"SENDTO %s\n",str); 
+        		//fprintf(stderr,"SENDTO %s\n",str); 
         		break;
         	case SYSCALL_SYSLOG:
         		str=get_str_from_addr(pid,uregs_regs(uregs,2));
@@ -224,7 +231,7 @@ int monitor_child(pid_t pid, char* outfilename) {
         		// Write actual string
         		write(out,str,sizeof(char)*strlen(str));
 
-        		fprintf(stderr,"%s\n",str);         
+        		//fprintf(stderr,"%s\n",str);         
         		break;
         }
 
@@ -233,7 +240,11 @@ int monitor_child(pid_t pid, char* outfilename) {
 
         // Get return value of system call
         retval = ptrace(PTRACE_PEEKUSER, pid, sizeof(long)*RAX);
-        //fprintf(stderr, "%d\n", retval);
+        if(save_retval){
+        	//fprintf(stderr, "Write retval=%d\n",retval);
+        	write(out, &retval, sizeof(retval));
+        }
+        ////fprintf(stderr, "%d\n", retval);
 
         //fflush(out);
     }
@@ -241,22 +252,178 @@ int monitor_child(pid_t pid, char* outfilename) {
     return 0;
 }
 
+struct mydesc{
+	long oldd;
+	int newd;
+	char* name;
+	struct mydesc* next;
+} typedef mydesc;
+
+mydesc* descriptors=NULL;
+int getDescriptor(long old){
+	mydesc* iter=descriptors;
+	while(iter!=NULL){
+		if(old==iter->oldd) return iter->newd;
+		iter=iter->next;
+	}
+	return 0;
+}
+
+void addDescriptor(long old, int new, char* name){
+	mydesc* newdesc=malloc(sizeof(mydesc));
+	newdesc->oldd=old;
+	newdesc->newd=new;
+	newdesc->name=name;
+	newdesc->next=NULL;
+
+	mydesc* iter=descriptors;
+	if(iter==NULL){
+		descriptors=newdesc;
+		return;
+	}
+
+	while(iter->next!=NULL) iter=iter->next;
+	iter->next=newdesc;
+}
+
+void closeDescriptors(){
+	mydesc* iter=descriptors;
+	while(iter!=NULL){
+		close(iter->newd);
+		iter=iter->next;
+	}
+}
+
+struct sockaddr_un {
+   sa_family_t sun_family;               /* AF_UNIX */
+   char        sun_path[108];            /* pathname */
+};
+
 void simulate(char* intfilename){
 	int in=open(intfilename,O_RDONLY);
+
+	setlogmask (LOG_UPTO (LOG_NOTICE));
+	openlog ("prog", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1); // TODO progname
+
+	if(in==0){
+		//fprintf(stderr,"Error opening file %s.\n",intfilename);
+		exit(1);
+	}
+	long lbuff,fd;
+	void* buff=NULL;
+	off_t offset = 0;
+	char* str;
+	while(1){
+		if(read(in, &lbuff, sizeof(lbuff))<=0) break;
+		switch(lbuff){
+			case SYSCALL_OPEN:
+				read(in, &lbuff, sizeof(lbuff));
+				
+				str=malloc(lbuff);
+				read(in, str, lbuff);
+
+				read(in, &fd, sizeof(fd));
+
+				addDescriptor(fd, open(str, O_WRONLY|O_CREAT, S_IRUSR | S_IRGRP | S_IROTH), str);
+				printf("OPEN %s\n",str);
+
+				break;
+			case SYSCALL_WRITE:
+				read(in, &fd, sizeof(long));
+
+				if(fd!=1) fd=getDescriptor(fd);
+
+				read(in, &lbuff, sizeof(long));
+
+				buff=malloc(lbuff);
+				read(in, buff, lbuff);
+				if(fd!=0) write(fd,buff,lbuff);
+
+				printf("WRITE %d bytes,\n", fd);
+				
+				break;
+			case SYSCALL_CONNECT:
+
+				str=malloc(108);
+    			read(in, str, 108);
+
+    			if(strcmp(str,"/dev/log")==0){
+					int nfd=socket(PF_LOCAL, SOCK_DGRAM|SOCK_CLOEXEC, 0);
+	    			struct sockaddr_un sabf={AF_UNIX,"/dev/log"};
+	    			connect(nfd, &sabf, 110);
+					addDescriptor(fd,nfd,"/dev/log");
+					printf("LOG CONNECT \n");
+	    		}
+
+    			//write_form_addr(out, pid, uregs_regs(uregs,2)+sizeof(short), 108);
+    			
+				break;
+			case SYSCALL_SENDTO:        		
+
+        		read(in, &fd, sizeof(fd));
+
+        		//fprintf(stderr,"AA, %d\n",fd); 
+        		fd=getDescriptor(fd);
+        		
+        		read(in, &lbuff, sizeof(lbuff));
+
+        		buff=malloc(lbuff);
+
+				read(in, buff, lbuff);
+				if(fd!=0) sendto(fd, buff, lbuff, MSG_NOSIGNAL, NULL, 0);
+
+				printf("SENDTO %d \n");
+
+				break;
+			case SYSCALL_SYSLOG:
+
+        		read(in, &lbuff, sizeof(lbuff));
+
+        		// Write actual string
+        		//write(out,str,sizeof(char)*strlen(str));
+        		str=malloc(lbuff);
+        		read(in, str, lbuff);
+        		syslog (LOG_NOTICE, str, getuid());
+
+        		printf("SYSLOG %s \n",str);
+
+        		////fprintf(stderr,"%s\n",str);
+				break;
+			default:
+				fprintf(stderr,"PARSE ERROR\n");
+				break;
+		}
+		if(buff!=NULL) free(buff);
+		buff=NULL;
+	}
+	closelog();
+	closeDescriptors();
+	close(in);
+}
+
+void printUsage(char **argv){
+	//fprintf(stderr, "Usage: %s -cr output|inputfile [prog [args]] \n", argv[0]);
+	exit(1);
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s prog args\n", argv[0]);
-        exit(1);
-    }
-    // Fork for chil
-    pid_t child = fork();
-    if (child == 0) {
-    	// Execute child
-        return exe_child(argc-2, argv+2);
-    } else {
-    	// Parent monitors child write and log syscalls
-        return monitor_child(child,argv[1]);
-    }
+    if (argc < 3) printUsage(argv);
+        
+    if(strcmp(argv[1],"-c")==0){
+    	if(argc < 4) printUsage(argv);
+
+	    // Fork for chil
+	    pid_t child = fork();
+	    if (child == 0) {
+	    	// Execute child
+	        return exe_child(argc-3, argv+3);
+	    } else {
+	    	// Parent monitors child write and log syscalls
+	        return monitor_child(child,argv[2]);
+	    }
+	}else if(strcmp(argv[1],"-r")==0){
+		simulate(argv[2]);
+	}else{
+		//fprintf(stderr, "Unrecognized mode %s.\n",argv[1]);
+	}
 }
