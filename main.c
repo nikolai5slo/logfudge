@@ -86,10 +86,14 @@ char* get_str_from_addr(pid_t pid,long addr){
 
 void write_form_addr(int fd,pid_t pid,long addr,size_t len){
 	long buffer;
-	for(int i=sizeof(long);i<len;i+=sizeof(long)){
-		buffer=ptrace(PTRACE_PEEKDATA, pid, addr);
-		write(fd, &buffer, sizeof(long));
-		addr+=sizeof(long);
+	int i;
+
+	if(len>sizeof(long)){
+		for(int i=0;i<len;i+=sizeof(long)){
+			buffer=ptrace(PTRACE_PEEKDATA, pid, addr);
+			write(fd, &buffer, sizeof(long));
+			addr+=sizeof(long);
+		}
 	}
 
 	buffer=ptrace(PTRACE_PEEKDATA, pid, addr);
