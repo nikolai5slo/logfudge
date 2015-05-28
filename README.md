@@ -1,14 +1,17 @@
 # logfudge
 LogFudge for linux
 
-INSTALL:
-  autoreconf -i
-  ./configure 
-  make
+## COMPILE
+```bash
+autoreconf -i
+./configure 
+make
+```
+## USAGE
+```bash
+Collecting mode
+./logfudge -c data.lfg P arg1 arg2 arg3
 
-USAGE
-  Collecting mode
-  ./logfudge -c data.lfg P arg1 arg2 arg3
-  
-  Recreate mode
-  ./logfudge -r data.lfg
+Recreate mode
+./logfudge -r data.lfg
+```
